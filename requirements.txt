@@ -1,0 +1,8 @@
+wheel
+requests
+pyaml-env
+pycryptodome
+pyscard
+ecdsa
+git+https://git@github.com/PodgroupConnectivity/asterix.git@a8e997e5d8947dbfb40036c69e9d61a53565c310
+git+https://git@github.com/PodgroupConnectivity/tlspsk.git@5412bdc36cf2b0edcaab94764fb261e68ad2e31d

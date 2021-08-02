@@ -1,0 +1,15 @@
+# Use `!ENV ${VAR}` to request loading from environment variables
+# Or preset your values here
+
+server:
+ api_baseurl: 'https://iotsim.podgroup.com/v1' # !ENV ${API_BASEURL} # Check https://iotsim.podgroup.com/v1/docs/#
+ tlsproxy_url: '34.253.244.76' # !ENV ${TLSPROXY_URL}
+ tlsproxy_port: '11111' # !ENV ${TLSPROXY_PORT}
+ tlsproxy_keyenc: !ENV ${TLSPROXY_KEYENC} # SECRET. ASK FOR YOURS.
+account:
+ api_user: !ENV ${API_USER} # SECRET. ASK FOR YOURS.
+ api_pass: !ENV ${API_PASS} # SECRET. ASK FOR YOURS.
+device:
+ device_id: '' # !ENV ${DEVICE_ID}
+ sim_iccid: '' # !ENV ${SIM_ICCID}
+ sim_key: '' # !ENV ${SIM_KEY}

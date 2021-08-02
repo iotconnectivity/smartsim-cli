@@ -1,0 +1,311 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+#
+# Copyright (C) 2020-2021 Pod Group Ltd.
+#
+# Authors:
+#   - J. Félix Ontañón <felix.ontanon@podgroup.com>
+#   - Kostiantyn Chertov <kostiantyn.chertov@podgroup.com>
+# 
+# Usage: WIP
+# 
+
+import os
+import sys
+import json
+
+from pyaml_env import parse_config
+
+from enosim import logger
+import enosim.tlsclient
+import enosim.apiclient
+import enosim.keys
+
+# Server details
+TLSPROXY_URL = os.getenv('TLSPROXY_URL', '34.253.244.76')
+TLSPROXY_PORT = os.getenv('TLSPROXY_PORT', '11111')
+TLSPROXY_KEYENC = os.getenv('KEYENC', '') # Secret
+API_BASEURL = os.getenv('API_HOST', 'https://iotsim.podgroup.com/v1')
+
+# Account details
+API_USER = os.getenv('API_USER', ) # Secret
+API_PASS = os.getenv('API_PASS', ) # Secret
+
+# Device details
+DEVICE_ID = os.getenv('DEVICE_ID', '') # Secret
+SIM_ICCID = os.getenv('SIM_ICCID', '') # Secret
+SIM_KEY = os.getenv('SIM_KEY', '') # Secret
+
+# A default payload for SIM2Cloud Encryption simulation
+# in the case the end user did not specified via command arguments
+# TODO: Move to config.yml
+STC_DEFAULT_PAYLOAD = '{"temperature": "21", "humidity": "70"}'
+
+# A default configuration for Zero Touch Provisioning simulation
+# in the case the end user did not specified via command arguments
+# TODO: Move to config.yml
+ZTP_DEFAULT_PAYLOAD = '[{"action": "iot:Alarm", "effect": "On"}]'
+
+# Default config file path
+CONFIG_FP = os.getenv('CONFIG', './config.yml')
+
+
+def psk_updatekey(config):
+    logger.debug('device_updatekey initialized with input data: %s' % str(config))
+
+    if not config['server']['tlsproxy_keyenc'] or config['server']['tlsproxy_keyenc'] == 'N/A':
+        logger.error('device_updatekey requires TLSPROXY_KEYENC. You can define via environment variable or config file')
+        sys.exit(1)
+
+    if config['device']['sim_key'] and config['device']['sim_key'] != 'N/A': # If key passed as argument: use it.
+        psk_hex = config['device']['sim_key']
+        psk_s, kcv_hex = enosim.keys.get_encoded_psk(psk_hex)
+        logger.debug("PSK Used: %s (%s) | KCV: %s" % (psk_hex, psk_s, kcv_hex))
+    else:  # If not key passed as argument: generate random
+        psk_hex = enosim.keys.get_random_psk()
+        psk_s, kcv_hex = enosim.keys.get_encoded_psk(psk_hex)
+        logger.debug('PSK Generated: {}'.format(psk_hex))
+
+    # Server API client instance
+    server_conn = enosim.apiclient.IoTSIMServiceConn(
+        config['server']['api_baseurl'], 
+        config['account']['api_user'], 
+        config['account']['api_pass']
+    )
+
+    # Calculate encrypted version of key
+    encrypted_psk = enosim.keys.get_encrypted_psk(
+        config['device']['sim_iccid'][0:18], 
+        psk_s, 
+        config['server']['tlsproxy_keyenc']
+    )
+
+    # Upload PSK to server
+    res = server_conn.update_psk(config['device']['sim_iccid'][0:18], encrypted_psk)
+
+    if res.status_code == enosim.SERVER_OK:
+        logger.info("PSK Updated for %s" % config['device']['sim_iccid'])
+        logger.info('Save the key later use: %s' % psk_hex)
+        logger.info('You may want to store it on the config file: %s' % CONFIG_FP)
+        return True
+    else:
+        logger.error("Cannot Update PSK for %s (SERVER ERROR %s): %s" % (config['device']['sim_iccid'], res.status_code, res.text))
+        return False
+
+
+def psk_setkey(config):
+    logger.debug('device_setkey initialized with input data: %s' % str(config))
+
+    if not config['server']['tlsproxy_keyenc'] or config['server']['tlsproxy_keyenc'] == 'N/A':
+        logger.error('device_setkey requires TLSPROXY_KEYENC. You can define via environment variable or config file')
+        sys.exit(1)
+
+    if config['device']['sim_key'] and config['device']['sim_key'] != 'N/A': # If key passed as argument: use it.
+        psk_hex = config['device']['sim_key']
+        logger.debug('PSK Used: {}'.format(psk_hex))
+    else: # If not key passed as argument: generate random
+        psk_hex = enosim.keys.get_random_psk()
+        logger.debug('PSK Generated: {}'.format(psk_hex))
+    psk_s, kcv_hex = enosim.keys.get_encoded_psk(psk_hex)
+
+    # Server API client instance
+    server_conn = enosim.apiclient.IoTSIMServiceConn(
+        config['server']['api_baseurl'],
+        config['account']['api_user'],
+        config['account']['api_pass']
+    )
+
+    # Write clear PSK on physical SIM with usb smartcard reader
+    the_sim = enosim.SIMCardManager()
+    iccid = the_sim.get_iccid()
+
+    # Calculate encrypted version of key
+    encrypted_psk = enosim.keys.get_encrypted_psk(
+        iccid[0:18],  # config['device']['sim_iccid'][0:18],
+        psk_s,
+        config['server']['tlsproxy_keyenc']
+    )
+
+    if the_sim.put_psk(psk_hex, kcv_hex):
+        logger.info("PSK installed on SIM correctly.")
+    else:
+        logger.error("PSK SIM installation failed. The generated PSK has not been propagated to Server.")
+        sys.exit(3)
+
+    # Upload PSK to server
+    res = server_conn.update_psk(iccid[0:18], encrypted_psk)
+
+    if res.status_code == enosim.SERVER_OK:
+        logger.info("PSK Updated for %s" % config['device']['sim_iccid'])
+        logger.info('Save the key later use: %s' % psk_hex)
+        logger.info('You may want to store it on the config file: %s' % CONFIG_FP)
+        return True
+    else:
+        logger.error("Cannot Update PSK for %s (SERVER ERROR %s): %s" % (config['device']['sim_iccid'], res.status_code, res.text))
+        return False
+
+
+def device_addconfig(config):
+    logger.debug('device_addconfig initialized with input data: %s' % str(config))
+
+    # Server API client instance
+    server_conn = enosim.apiclient.IoTSIMServiceConn(
+        config['server']['api_baseurl'], 
+        config['account']['api_user'], 
+        config['account']['api_pass']
+    )
+
+    # Upload Config to server
+    res = server_conn.create_config(
+        config['device']['device_id'],
+        config['device']['sim_iccid'],
+        config['jsondata'] or ZTP_DEFAULT_PAYLOAD
+    )
+
+    if res.status_code == enosim.SERVER_OK:
+        logger.info('Configuration added for device %s with sim %s on the cloud' % \
+            (config['device']['device_id'], config['device']['sim_iccid']))
+        logger.info(res.request.body)
+        return True
+    else:
+        logger.error("Cannot add configuration (SERVER ERROR %s): %s" % (res.status_code, res.text))
+        return False
+
+
+def device_getdata(config):
+    logger.debug('device_getdata requested for DEVICE ID: %s' % str(config['device']['device_id']))
+
+    # Server API client instance
+    server_conn = enosim.apiclient.IoTSIMServiceConn(
+        config['server']['api_baseurl'],
+        config['account']['api_user'],
+        config['account']['api_pass']
+    )
+
+    # Get telemetry data
+    res = server_conn.get_data(config['device']['device_id'])
+
+    if res.status_code == enosim.SERVER_OK:
+        logger.info(json.dumps(res.json(), indent=2))
+        return True
+    else:
+        logger.error("device_getdata failed (SERVER ERROR %s): %s" % (res.status_code, res.text))
+        return False
+
+
+def simulate_ztp(config):
+    logger.debug('simulate_ztp initialized with input data: %s' % str(config))
+    enosim.tlsclient.simulate_ztp(
+        config['server']['tlsproxy_url'], config['server']['tlsproxy_port'],
+        config['device']['sim_key'], config['device']['sim_iccid'], config['device']['device_id']
+    )
+
+
+def simulate_stc(config):
+    logger.debug('simulate_stc initialized with input data: %s' % str(config))
+    enosim.tlsclient.simulate_stc(
+        config['server']['tlsproxy_url'], config['server']['tlsproxy_port'],
+        config['device']['sim_key'], config['device']['sim_iccid'], config['device']['device_id'],
+        config['jsondata'] or STC_DEFAULT_PAYLOAD
+    )
+
+
+def config_manager(config_file, args):
+    config = parse_config(config_file)
+
+    return {
+        'server': {
+            'tlsproxy_url': config['server']['tlsproxy_url'] or TLSPROXY_URL,
+            'tlsproxy_port': int(config['server']['tlsproxy_port']) or TLSPROXY_PORT,
+            'tlsproxy_keyenc': config['server']['tlsproxy_keyenc'] or TLSPROXY_KEYENC,
+            'api_baseurl': config['server']['api_baseurl'] or API_BASEURL
+        },
+        'account': {
+            'api_user': config['account']['api_user'] or API_USER,
+            'api_pass': config['account']['api_pass'] or API_PASS
+        },
+        'device': {
+            'device_id': hasattr(args, 'device_id') and args.device_id or config['device']['device_id'] or DEVICE_ID,
+            'sim_iccid': hasattr(args, 'sim_iccid') and args.sim_iccid or config['device']['sim_iccid'] or SIM_ICCID,
+            'sim_key': hasattr(args, 'sim_key') and args.sim_key or config['device']['sim_key'] or SIM_KEY
+        },
+        'jsondata': hasattr(args, 'jsondata') and args.jsondata or None
+    }
+
+
+if __name__ == '__main__':
+    import argparse
+
+    # Main Parser
+    parser = argparse.ArgumentParser(description="A cli tool to manage ENO SIM keys and simulate ZTP and STC requests against a cloud server.")
+    subparsers = parser.add_subparsers(help='commands available')
+
+    # PSK 
+    parser_psk = subparsers.add_parser('psk', help='Manage PSK (preshared-key) for physical and simulated SIM')
+    psk_subparsers = parser_psk.add_subparsers(help='Manage PSK (preshared-key) for physical and simulated SIM')
+
+    # PSK Update SIM Keys (upload to the server)
+    parser_psk_update = psk_subparsers.add_parser('updatekey', help='Upload the PSK for a SIM already available in the server (useful for simulatons)')
+    parser_psk_update.add_argument("-i", "--sim_iccid", default=None, type=str, required=False, help="A SIM card ICCID (19 digits length)")
+    parser_psk_update.add_argument("-k", "--sim_key", default=None, type=str, required=False, help="Place here a PSK hex hash to set, or leave empty if you want a random one to be generated")
+    parser_psk_update.set_defaults(func=psk_updatekey)
+
+    # PSK Set SIM Keys (for SIM & server)
+    parser_psk_create = psk_subparsers.add_parser('setkey', help='Write a PSK on a physical SIM, and upload it to the server (you need a SmartCard reader)')
+    parser_psk_create.add_argument("-i", "--sim_iccid", default=None, type=str, required=False, help="ICCID of the inserted SIM on your SmartCard reader (19 digits length)")
+    parser_psk_create.add_argument("-k", "--sim_key", default=None, type=str, required=False, help="Place here a PSK hex hash to set, or leave empty if you want a random one to be generated")
+    parser_psk_create.set_defaults(func=psk_setkey)
+
+    # Device
+    parser_device = subparsers.add_parser('device', help='Add device config or get device data')
+    device_subparsers = parser_device.add_subparsers(help='Add device config or get device data')
+
+    # Device Add Config
+    parser_device_config = device_subparsers.add_parser('addconfig', help='Upload a Zero-Touch-Provisioning configuration for your device')
+    parser_device_config.add_argument("-i", "--sim_iccid", default=None, type=str, required=False, help="A SIM card ICCID. Any 19 digits length value will work here")
+    parser_device_config.add_argument("-d", "--device_id", default=None, type=str, required=False, help="Your device id. You can use IMEI, or any arbitrary string")
+    parser_device_config.add_argument("-j", "--jsondata", default=None, type=str, required=False, help="An arbitrary JSON string with the configuration for your device")
+    parser_device_config.set_defaults(func=device_addconfig)
+
+    # Device Get STC Data
+    parser_device_data = device_subparsers.add_parser('getdata', help='Retrieve SIM2Cloud-Encryption telemetry uploaded')
+    parser_device_data.add_argument("-d", "--device_id", default=None, type=str, required=False, help="Your device id. Please recall to run `device addconfig` first")
+    parser_device_data.set_defaults(func=device_getdata)
+
+    # Simulate
+    parser_simulate = subparsers.add_parser('simulate', help='Simulate Zero-Touch-Provisioning or SIM2Cloud-Encryption requests')
+    simulate_subparsers = parser_simulate.add_subparsers(help='commands available')
+
+    # Simulate ZTP
+    parser_simulate_ztp = simulate_subparsers.add_parser('ztp', help='Simulate Zero-Touch-Provisioning request: device will download last configuration added')
+    parser_simulate_ztp.add_argument("-i", "--sim_iccid", default=None, type=str, required=False, help="A SIM card ICCID. Please recall to run `device setkey` first")
+    parser_simulate_ztp.add_argument("-d", "--device_id", default=None, type=str, required=False, help="Your device id. Please recall to run `device addconfig` first")
+    parser_simulate_ztp.add_argument("-k", "--sim_key", default=None, type=str, required=False, help="The preshared-key associated with your SIM card ICCID")
+    parser_simulate_ztp.set_defaults(func=simulate_ztp)
+
+    # Simulate STC
+    parser_simulate_stc = simulate_subparsers.add_parser('stc', help='Simulate SIM2Cloud-Encryption request: upload new device telemetry')
+    parser_simulate_stc.add_argument("-i", "--sim_iccid", default=None, type=str, required=False, help="A SIM card ICCID. Please recall to run `device setkey` first")
+    parser_simulate_stc.add_argument("-d", "--device_id", default=None, type=str, required=False, help="Your device id. You can use IMEI, or any arbitrary string")
+    parser_simulate_stc.add_argument("-k", "--sim_key", default=None, type=str, required=False, help="The preshared-key associated with your SIM card ICCID")
+    parser_simulate_stc.add_argument("-j", "--jsondata", default=None, type=str, required=False, help="An arbitrary JSON string representin device telemetry data")
+    parser_simulate_stc.set_defaults(func=simulate_stc)
+
+    args = parser.parse_args()
+
+    if len(sys.argv) <= 1:
+        parser.print_usage(sys.stderr)
+        sys.exit(1)
+    elif len(sys.argv) <= 2:
+        if (sys.argv[1] == "device"):
+            parser_device.print_usage(sys.stderr)
+            sys.exit(1)
+        elif (sys.argv[1] == "simulate"):
+            parser_simulate.print_usage(sys.stderr)
+            sys.exit(1)
+        else:
+            parser.print_usage(sys.stderr)
+            sys.exit(1)
+    else:
+        config = config_manager(CONFIG_FP, args)
+        args.func(config)
